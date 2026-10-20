@@ -1,0 +1,47 @@
+project:
+  type: website
+  execute-dir: project
+  render:
+    - index.qmd
+    - script/week1.2.qmd
+    - script/week2.1.qmd
+    - script/week2.2.qmd
+    - script/week3.1.qmd
+    - script/week3.2.qmd
+    - script/week4.1.qmd
+    - script/week4.2.qmd
+    - script/week5.1.qmd
+    - script/week5.2.qmd
+
+website:
+  title: "ENV-320 2025 tutorials"
+  sidebar:
+    contents:
+      - index.qmd
+      - section: "Sessions"
+        contents: 
+          - script/week1.2.qmd
+          - script/week2.1.qmd
+          - script/week2.2.qmd
+          - script/week3.1.qmd
+          - script/week3.2.qmd
+          - script/week4.1.qmd
+          - script/week4.2.qmd
+          - script/week5.1.qmd
+          - script/week5.2.qmd
+author:
+  - name: "David Wuepper, Hadi, and Wyclife Agumba Oluoch"
+    affiliation: "[Land Economics Group](https://www.ilr1.uni-bonn.de/en/research/research-groups/land-economics), University of Bonn, Bonn, Germany"
+date: today
+bibliography: references.bib
+number-sections: true
+
+format:
+  html:
+    toc: true
+    theme: cosmo
+    code-line-numbers: true
+    code-block-bg: "#e5e5e5"
+
+execute:
+  freeze: true

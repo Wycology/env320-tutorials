@@ -1,0 +1,405 @@
+---
+title: "<span style='color:green'>Tea mapping III: Applying the model to 2020 and mapping change</span>"
+subtitle: "Lecture date: 08-01-2026"
+---
+
+## Introduction
+
+In this session, we will learn how to use an already built spatial machine learning model from `sdm` package [@sdm] to predict tea fields on our data for the same `roi` but different time. The main task is to segment tea fields in the same region of interest but on data that the model was never trained on.
+
+## Google Earth Engine
+
+You can run the code in the snippet below in the `GEE` code editor to obtain the `Sentinel+2 + canopy height` for use in this script
+
+```{.javascript}
+
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED");
+var cs_plus = ee.ImageCollection("GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED");
+var roi = ee.FeatureCollection("projects/ee-wyclifeaoluoch/assets/roi_win_2025") // Change to your asset path
+var canopy_ht = ee.ImageCollection("projects/sat-io/open-datasets/facebook/meta-canopy-height");
+
+/*
+SATELLITE DATA FOR AGRICULTURAL ECONOMISTS
+THEORY AND PRACTICE
+
+Mapping tea plantations in Kericho region of Kenya: Machine Learning Approach
+David Wuepper, Hadi, Wyclife Agumba Oluoch
+Affiliations:
+  - Land Economics Group (https://www.ilr1.uni-bonn.de/en/research/research-groups/land-economics), University of Bonn, Bonn, Germany
+
+This script, demonstrates how to create, visualize, and export to drive a cloud-free Sentinel-2 composite and canopy height data
+for use in machine and deep learning models. The model trained in 2025 is used to predict in this image of 2020
+*/
+
+// --------------------------------------------
+// 1. Band Selection for Sentinel-2
+// --------------------------------------------
+// Define relevant Sentinel-2 bands for vegetation/cropland analysis.
+// These include visible, red-edge, near-infrared, and shortwave-infrared bands.
+
+var selected_bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B9', 'B11', 'B12'];
+
+s2 = s2.select(selected_bands);
+
+print('selected_bands', selected_bands);
+
+// --------------------------------------------
+// 2. Define Time Range for Image Collection
+// --------------------------------------------
+
+var start_date = "2020-01-01";  // Start date of image collection
+var end_date = "2021-01-01";    // End date of image collection
+
+// --------------------------------------------
+// 3. Mosaic the canopy height, clip, convert to float and rename
+// --------------------------------------------
+
+canopy_ht = canopy_ht.mosaic().rename('ch');
+
+// --------------------------------------------
+// 4. Create Cloud-Free Composite
+// --------------------------------------------
+// Filter by region of interest (roi), apply cloud score mask, and generate a median composite.
+
+var composite = s2
+  .filterBounds(roi)                          // Keep images overlapping the region of interest
+  .filterDate(start_date, end_date)           // Filter only for the dates needed
+  .linkCollection(cs_plus, 'cs')              // Attach the cloud score band 
+  .map(function(img){
+    return img.updateMask(img.select('cs').gte(0.6));  // Mask out cloudy pixels (cloud score < 0.6)
+  })
+  .median()                                   // Reduce image collection to a single median image
+  .multiply(0.0001)                           // Scale reflectance values
+  .select(selected_bands)                     // Re-select bands post-scaling, 'cs' was linked
+  .addBands(canopy_ht)
+  .toFloat();                                 // Clip the final composite to the region of interest
+
+// Print image properties to console to verify band structure and completeness
+
+print('Composite with canopy height', composite);  // Expecting a single image with 10 bands
+
+// How many images contributed to the median
+
+print('Images used', 
+  s2
+  .filterBounds(roi)
+  .filterDate(start_date, end_date)
+  .linkCollection(cs_plus, 'cs')
+    .map(function(img){
+      return img.updateMask(img.select('cs').gte(0.6));
+      }));
+  
+//  Compare with cloudy pixel percentage (Old approach...only 21 images or so)
+print('Images used no cs_plus', 
+  s2
+  .filterBounds(roi)
+  .filterDate(start_date, end_date)
+  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10)));
+
+// --------------------------------------------
+// 5. Visualization of the Composite
+// --------------------------------------------
+// Add a true-color layer (RGB: B4, B3, B2) to the map for visual inspection
+Map.centerObject({object: roi, zoom: 13});
+
+Map.addLayer(
+  composite.clip(roi), 
+  {
+    min: 0.019347,              // Obtained from the Layers panel, min value (sometimes based on 98% of values)
+    max: 0.124803,              // Obtained from the Layers panel, these are to enhance visualization
+    bands: ['B4', 'B3', 'B2']   // Bands to use for visualization, RGB (true color composite)
+  }, 
+  'composite',                  // Name of the layers in Layers panel
+  false                         // Do not display layer by default (can be turned on in Layers panel), makes computations faster
+);
+
+// --------------------------------------------
+// 6. Display ROI Outline
+// --------------------------------------------
+// Paint the ROI geometry outline in red
+
+var roi_outline = ee.Image().paint({ // Paints the edges of roi as new raster layer
+  featureCollection: roi,            // The region of interest to be visualized
+  width: 4                           // Outline thickness in pixels
+});
+
+// Center the map view on the ROI and add the red border outline
+
+Map.addLayer(roi_outline, {palette: 'red'}, 'roi');
+
+// --------------------------------------------
+// 7. Export Image Composite to Google Drive
+// --------------------------------------------
+// Save the processed image composite for offline use (e.g., in Python or GIS software)
+
+Export.image.toDrive({                // Function to export an image to Google drive
+  image: composite,                   // The image to be exported
+  description: 'temporal_image',      // Task name to appear in the Tasks tab while exporting
+  folder: 'winter2025',               // Folder in your Google Drive to hold the image
+  fileNamePrefix: 'temporal2025',     // Prefix for output file name
+  region: roi,                        // Export region bounds
+  scale: 10,                          // Spatial resolution (Sentinel-2 native resolution)
+  maxPixels: 1e13,                    // Allow large exports
+  crs: "EPSG:3857"                    // Set coordinate reference system (Web Mercator)
+});
+
+// --------------------------------------------
+// 10. Script Summary
+// --------------------------------------------
+/*
+This script demonstrates the workflow for generating a small cloud-free Sentinel-2 image composite and canopy height data
+for a small administrative region in Kenya, specifically tailored for agricultural analysis.
+It includes:
+
+- Selecting and preprocessing relevant spectral bands
+- Applying a cloud mask using a cloud score (`cs_plus`)
+- Generating a 'clean' median composite
+- Visualizing the composite and roi
+- Exporting the composite image for further analysis in GIS or machine learning tools
+
+Adapt and extend this script to fit your specific region, time period, or classification objectives.
+*/
+
+/////////////////E N D //////////////////
+
+```
+
+## Data sets
+
+We are going to make use of raster data we downloaded from [Google Earth Engine](https://code.earthengine.google.com/7c19741e50117323f6b04716126d3b9c). You need to have GEE account to be able to see the script in GEE and rerun the extraction task. The raster data is cloud-free median Sentinel-2 image for the year 2020 (filtered for the dates 2020-01-01 to 2021-01-01). The last date ensures that the images for 2020-12-31 are also obtained otherwise they will be ignored.
+
+After exporting the image to drive, we download it to our predefined data folder inside our `R` project.
+
+## Loading libraries
+
+We will make use of the following packages to achieve the classification task:
+
+```{r}
+#| message: false
+library(sdm)            # version 1.2.67
+library(ggplot2)        # version 4.0.1
+library(dplyr)          # version 1.1.4
+```
+
+## Loading the data
+
+Here, our only data is the dataset which we will transfer the model to, that is, the Sentinel-2 image for the year 2020:
+
+-   **temporal_stack**: Raster dataset of the Sentinel-2 images and canopy height to predict tea plantations
+
+```{r}
+temporal_stack <- rast("data/temporal2025.tif")
+```
+
+We need to apply our model on this new data.
+
+## Visualize the data
+
+```{r}
+plot(temporal_stack$B7)
+```
+
+We did not clip the image to `roi` when exporting from GEE. Let us do that locally.
+
+```{r}
+roi <- vect("data/roi.shp")
+roi <- project(roi, crs(temporal_stack))
+temporal_stack <- crop(temporal_stack, roi, mask = TRUE)
+plot(temporal_stack$B7)
+```
+
+## Load the model
+
+The next step after bringing in the new data is to load the model which we will use to make prediction on it. This is the same model we trained earlier on the 2024 images. We will use a function from `sdm` package to read the model in.
+
+```{r}
+#| message: false
+temporal_model <- read.sdm("models/model_ens.sdm")
+temporal_model
+```
+
+## AoA
+
+Before we can use a model trained in one time (2024) to make prediction in a different time (2020), it is important to check how similar the two times are pixelwise. That is whether the pixel values in 2024 data where the model was trained are in the same range as the pixel values in the 2020 data for the same `roi`. To do this, we can use `aoa` function from sdm package. It stands for Area of Applicability.
+
+```{r}
+temp_aoa <- aoa(x = temporal_stack, d = temporal_model)
+```
+
+Let us then visualize the area of applicability.
+
+```{r}
+plot(temp_aoa)
+```
+
+The areas with values close to 1 are quite similar in terms of pixel values to those where the model was trained. Therefore, we are more confident in predictions made in such areas. On the other hand, areas that are closer to 0 have values that are different from those that the model was exposed to or trained on, hence our confidence is lower in predictions made in such areas. We expect most areas to be closer to 1 so that we are more confident in our transferred model.
+
+With that confidence, we can then use the model to make prediction on the new data:
+
+```{r}
+p_temporal <- predict(temporal_model, temporal_stack, mean = TRUE)
+```
+
+Visualize the mean prediction:
+
+```{r}
+plot(p_temporal)
+```
+
+### Ensemble model by combining several methods (Recommended)
+
+As with the previous case, we can ensemble the methods.
+
+```{r}
+temporal_ens <- ensemble(x = temporal_model, 
+                newdata = temporal_stack,
+                setting = list(method = "weighted", stat = "TSS", opt = 2))
+```
+
+Visualize the ensemble output
+
+```{r}
+plot(temporal_ens)
+```
+
+### Binary output
+
+We can use the *pa* function from `sdm` package [@sdm] to calculate the threshold to use that maximizes tss in order to derive a binary map from the probability output:
+
+```{r}
+temporal_bin_ens <- pa(x = temporal_ens, y = temporal_model, id = "ensemble", opt = 2)
+```
+
+Now we can have the binary map based on a threshold that maximizes specificity and sensitivity.
+
+```{r}
+plot(temporal_bin_ens, main = "Binary Presence/Absence Map 2020",
+     col = c("grey90", "green4"))
+writeRaster(temporal_bin_ens, "outputs/bin_ens_2020.tif", overwrite = TRUE)
+```
+
+## Interactive inspection
+
+```{r}
+mapview::mapview(temporal_bin_ens, col.regions = c("transparent", "green"), alpha = 0.4)
+```
+
+## Area under tea
+
+We can then determine how much land is under tea in the region.
+
+```{r}
+temporal_tea_area <- terra::expanse(temporal_bin_ens, unit = "ha", byValue = TRUE)
+temporal_tea_area
+```
+
+```{r}
+temporal_tea_area |> 
+  mutate(Class = case_when(value == 1 ~ "Tea",
+                           value == 0 ~ "Non-tea",
+                           TRUE ~ as.character(value))) |> 
+  ggplot(aes(Class, area, fill = Class)) +
+  geom_col() +
+  # Add text labels on top of the bars
+  geom_text(aes(label = round(area)),  # Display area value, rounded to 2 decimals
+            vjust = -0.5,                 # Adjust vertical position (move up)
+            color = "black",               # Set text color
+            size = 5) +                    # Set text size
+  scale_fill_manual(values = c("Non-tea" = "gray70", "Tea" = "darkgreen")) +
+  theme_classic() +
+  # Optional: Adjust y-axis limits to make room for the text
+  ylim(0, max(temporal_tea_area$area) * 1.1) # Extends the y-axis limit by 10% to prevent clipping
+```
+
+## Create change map
+
+For brevity, we will use t1 = 2020 and t2 for 2025. So we want to see areas where tea has increased, decreased or remain the same etc.
+
+```{r}
+t1 <- rast("outputs/bin_ens_2020.tif")
+t2 <- rast("outputs/bin_ens.tif")
+par(mfrow = c(1, 2))
+plot(t1, col = c("white", "darkgreen"), main = "2020")
+plot(t2, col = c("white", "darkgreen"), main = "2025")
+```
+
+Let the change map be called ch_mp.
+
+```{r}
+t2 <- crop(t2, roi, mask = TRUE)
+ch_mp <- t1 
+
+ch_mp <- ifel(t1 == 0 & t2 == 0, 0,
+         ifel(t1 == 0 & t2 == 1, 1,
+         ifel(t1 == 1 & t2 == 0, 2, 3)))
+plot(ch_mp, col = c("gray", "blue", "red", "darkgreen"))
+```
+
+We can improve the plot
+
+```{r}
+library(tidyterra)
+
+# Make sure your categories are factors with labels
+ch_mp <- as.factor(ch_mp)
+levels(ch_mp) <- data.frame(
+  value = 0:3,
+  label = c("No tea", "Expansion", "Contraction", "Stable Tea")
+)
+
+# Plot with ggplot2
+ggplot() +
+  geom_spatraster(data = ch_mp) +
+  scale_fill_manual(
+    values = c("gray", "blue", "red", "darkgreen"),
+    name   = "Tea Change Map",
+    na.value = "transparent",
+    na.translate = FALSE
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text  = element_text(size = 10)
+  )
+
+```
+
+Finally, we can tell area under each class:
+
+```{r}
+expanse(ch_mp, unit = "ha", byValue = TRUE)
+```
+
+## Session summary
+
+In this session, we have demonstrated how to create a binary tea map using spatial machine learning model trained elsewhere on your new area.
+
+In this case, we did not have to train the model ourselves but used an existing model to make prediction elsewhere.
+
+## Assignments (Optional)
+
+1. **Practical exercise** ==> Apply a pre-trained spatial ML model to a new temporal dataset (e.g., 2017 Sentinel-2 image) to generate a binary tea map using your area of interest. Calculate area under tea.
+
+2. **Practical exercise** ==> Create a change map between two time points (e.g., 2017 vs 2025) showing expansion, contraction, stable tea, and no tea areas.
+
+3. **Conceptual question** ==> Why is checking Area of Applicability (AoA) important when transferring models across time?
+
+* Ensures input data at new time is within the range seen during model training.
+
+* Indicates confidence in predictions: areas close to 1 are reliable, near 0 are uncertain.
+
+* Helps avoid extrapolation errors and misclassification.
+
+4. **Applied question** ==>
+What factors can lead to inaccuracies when applying a model trained in one year to another year?
+
+* Differences in pixel values due to sensor, seasonality, or land cover changes.
+
+* Misalignment or resampling errors between datasets.
+
+* Model not generalizing well beyond training data.
+
+* Uncaptured environmental or management changes affecting crop appearance.
+
+## References

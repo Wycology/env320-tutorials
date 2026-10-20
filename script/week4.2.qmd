@@ -1,0 +1,211 @@
+---
+title: "<span style='color:green'>Deep learning I: Digitising tea label polygons in GEE</span>"
+subtitle: "Lecture date: 20-01-2026"
+---
+
+## Google Earth Engine
+
+Below is the `JavaScript` code that we will use in the Google Earth Engine (`GEE`) platform to create, visualize, and export to drive label/mask polygons for our $Kipchebor$ region of interest for deep learning tea plantations segmentation task. You can also run the script directly [Google Earth Engine](on%20https://code.earthengine.google.com/ff33399026c995c545489dbbceb132b2)
+
+## Data selection
+
+First we start the task by calling in all the relevant data that we need for the task:
+
+``` javascript
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED");
+var cs_plus = ee.ImageCollection("GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED");
+var roi = ee.FeatureCollection("projects/ee-wyclifeaoluoch/assets/roi_win_2025"); // Replace with your correct path
+```
+
+### Band selection for Sentinel-2
+
+Define the relevant Sentinel-2 bands for visualization and use as base map:
+
+``` javascript
+var selected_bands = ['B2', 'B3', 'B4']; // Basically the RGB
+
+s2 = s2.select(selected_bands);
+
+print('selected_bands', selected_bands);
+```
+
+## Define Time Range for ImageCollection
+
+``` javascript
+var start_date = "2024-01-01";  // Start date of image collection
+var end_date = "2025-01-01";    // End date of image collection
+```
+
+::: callout-note
+## Note
+
+Including `2025-01-01` ensures that the data for `2024-12-31` is captured as the last element is ignored. That is, the data for `2025-01-01` will not be included.
+:::
+
+## Create the cloud-free composite
+
+At this step, we will filter the Sentinel-2 images by the roi, date, apply cloud-score+ masking, get median image for the year, scale the values to reflectance, and select the appropriate bands:
+
+``` javascript
+var composite = s2
+  .filterBounds(roi)                          // Keep images overlapping the region of interest
+  .filterDate(start_date, end_date)           // Filter only for the dates needed
+  .linkCollection(cs_plus, 'cs')              // Attach the cloud score band 
+  .map(function(img){
+    return img.updateMask(img.select('cs').gte(0.6));  // Mask out cloudy pixels (cloud score < 0.6)
+  })
+  .median()                                   // Reduce image collection to a single median image
+  .multiply(0.0001)                           // Scale reflectance values
+  .select(selected_bands)                     // Re-select bands post-scaling, 'cs' was linked
+
+// Print image properties to console to verify band structure and completeness
+
+print('Composite with canopy height', composite);  // Expecting a single image with 10 bands
+```
+
+## Visualize the composite
+
+Next, we can add a true-color layer (RGB: B4, B3, B2) to the map for visual inspection:
+
+``` javascript
+Map.centerObject({object: roi, zoom: 13});
+
+Map.addLayer(
+  composite, 
+  {
+    min: 0.019347,              // Obtained from the Layers panel, min value (sometimes based on 98% of values)
+    max: 0.124803,              // Obtained from the Layers panel, these are to enhance visualization
+    bands: ['B4', 'B3', 'B2']   // Bands to use for visualization, RGB (true color composite)
+  }, 
+  'composite',                  // Name of the layers in Layers panel
+  false                         // Do not display layer by default (can be turned on in Layers panel), makes computations faster
+);
+```
+
+## Add `roi` boundary
+
+On top of the image, we can add (paint) the `roi` borders, just to verify that the image is falling within the bounds of our area of interest as follows:
+
+``` javascript
+var roi_outline = ee.Image().paint({ // Paints the edges of roi as new raster layer
+  featureCollection: roi,            // The region of interest to be visualized
+  width: 4                           // Outline thickness in pixels
+});
+
+// Center the map view on the ROI and add the red border outline
+
+Map.addLayer(roi_outline, {palette: 'red'}, 'roi');
+```
+
+## Create the polygons for tea and non-tea areas
+
+First, we will consider a **bounding box** or **extent** of the `roi` to be the area where we will create our polygons. This is useful for deep learning as opposed to classical machine learning as we will be pushing patches to the model, not just pixels.
+
+``` javascript
+var roi_bbox = roi.bounds();
+var bbox_outline = ee.Image().paint({
+  featureCollection: ee.FeatureCollection([ee.Feature(roi_bbox)]),
+  width: 3
+});
+
+Map.addLayer(bbox_outline, {palette: 'blue'}, 'ROI Bounding Box');
+```
+
+1.  Within the mapping area to the left, hover over `Draw a shape` icon and click it
+2.  `Geometry Imports` tab will pop, with **geometry** selected, click on `Edit layer properties` ⚙️
+3.  Configure geometry import will pop up. Under **Name** enter *tea_polys*
+4.  Under `Import as`, click drop down icon and select `FeatureCollection`
+5.  Under `Properties` click the add property button **+Property**, with under **Property** put $label$ and under **Value** put `1`. Click **OK**
+6.  Repeat the same for *non_tea_polys* under **Name** and under **Value** put `0`
+7.  On the composite map in display, select *tea_polys* and draw regions on the map you 'think' are tea plantations. Do the same for *non_tea_polys*. The polygons should be as distributed as possible throughout the `roi`.
+
+## Check the areas of both tea_polys and non_tea_polys
+
+It is important to have as balanced data as possible; where the size of tea plantations and non tea plantations digitized are roughly the same. We can continuously check this as follows:
+
+``` javascript
+var tea_area = tea_polys
+  .map(function(f){
+    return f.set('area_ha', f.geometry().area().divide(10000)); // each feature's area (ha)
+  })
+  .aggregate_sum('area_ha'); // sum of all features
+
+// Calculate total area in hectares
+var non_tea_area = non_tea_polys
+  .map(function(f){
+    return f.set('area_ha', f.geometry().area().divide(10000)); // each feature's area (ha)
+  })
+  .aggregate_sum('area_ha'); // sum of all features
+
+// Print total area
+print('Tea Area (ha):', tea_area);
+print('Non Tea Area (ha):', non_tea_area);
+```
+
+Once you are satisfied with the proportions, you can proceed and merge the two data sets
+
+## Merge the *tea_polys* with *non_tea_polys*
+
+``` javascript
+var training_polys = tea_polys.merge(non_tea_polys);
+print(training_polys);
+```
+
+## Handling undigitized areas
+
+When creating the two sets of polygons, we left some areas un-digitized. These could be problematic later when runing models, particularly with loss calculations. So, we will ensure that we assign all un-digitized areas a value of -1 which we will later ignore in loss calculation.
+
+``` javascript
+var unlabelled = ee.Feature(roi_bbox).geometry().difference(training_polys.geometry(), ee.ErrorMargin(1));
+
+var unlabelledFeature = ee.Feature(unlabelled, {label: -1});
+
+var full_labels = training_polys.merge(ee.FeatureCollection([unlabelledFeature]));
+
+Map.addLayer(full_labels);
+```
+
+Now the data set we have is consisting of tea plantations as label 1, non tea areas as label 0, and non digitized areas as label -1. The next is then to export it to Google Drive and download to our directory for R project.
+
+``` javascript
+Export.table.toDrive({
+  collection: training_polys, 
+  description: "training_polys", 
+  folder: "winter2025", 
+  fileNamePrefix: "training_polys", 
+  fileFormat: "GeoJSON"
+  });
+
+Export.table.toDrive({
+  collection: full_labels, 
+  description: "full_labels", 
+  folder: "winter2025", 
+  fileNamePrefix: "full_labels", 
+  fileFormat: "GeoJSON"
+  });
+```
+
+::: callout-note
+## Note
+
+Here we export twice, one with ignored areas as -1 and the other without ignored areas assigned. So that you can experiment with them later.
+:::
+
+## Summary of the script
+
+This script demonstrates the workflow for generating a small cloud-free Sentinel-2 image composite and canopy height data for a small administrative region in Kenya, specifically tailored for agricultural analysis. It includes:
+
+-   Selecting and pre-processing relevant spectral bands
+-   Applying a cloud mask using a cloud score (`cs_plus`)
+-   Generating a 'clean' median composite
+-   Visualizing the composite and `roi`
+-   Exporting the composite image for further analysis in GIS or machine learning tools
+-   Create training points for machine learning and export to drive
+
+This serves as a foundational pipeline that can be adapted by those interested in remote sensing applications in agriculture, particularly those involving machine learning and deep learning models.
+
+Adapt and extend this script to fit your specific region, time period, or classification objectives.
+
+## Exercies (Optional)
+
+1.  Keep adding more training polygons and export with different names hinting areas and experiment with model performance changes.

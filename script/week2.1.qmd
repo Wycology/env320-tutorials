@@ -1,0 +1,251 @@
+---
+title: "<span style='color:green'>Tea mapping I: Sentinel-2 composite and training points in GEE</span>"
+subtitle: "Lecture date: 16-12-2025"
+
+---
+
+Below is the `JavaScript` code that we will use in the Google Earth Engine (`GEE`) platform to obtain Sentinel-2 image composite and canopy height data for our $Kipchebor$ region of interest.
+
+## Data selection
+
+First we start the task by calling in all the relevant data that we need for the task:
+
+-   **Sentinel-2** ==\> Contain the necessary spectral bands
+
+-   **Cloud Score+** ==\> For masking cloudy pixels from sentinel-2 images
+
+-   **Canopy height** ==\> To help improve segmenting tea fields
+
+-   **roi** ==\> This is the bounding area within which we will extract data
+
+### Importing roi to `GEE`
+
+Open your [GEE Coding Environment](https://code.earthengine.google.com/) and follow these steps to import the $roi$ into the `GEE` for restricting the bounds within which we do the image download:
+
+* Click on `Assets` tab on the left
+* Click `New`
+* Select `Table Upload`
+* You then pick on `Shape files (.shp, .shx, .dbf, .prj, or .zip)`
+* On the pop up window, `Upload a new shapefile asset`, click **SELECT**
+* Navigate to the folder where you saved the shapefile
+* Select all files associated with .shp for the $roi$
+* Click **open** and then click **UPLOAD**
+* Go to the **Tasks** on the left, you'll see the file uploading
+* Wait until the upload bar turns blue (complete upload)
+* Go to the left under `Assets` and click refresh icon
+* You should be able to see the file under **CLOUD ASSETS**
+
+``` javascript
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+var cs_plus = ee.ImageCollection("GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED")
+var canopy_ht = "projects/sat-io/open-datasets/facebook/meta-canopy-height"
+var roi = "projects/ee-wyclifeaoluoch/assets/roi_win_2025"
+```
+
+::: callout-important
+## Note
+Change the path to roi to the appropriate one for your `GEE` account
+:::
+
+## Band Selection for Sentinel-2
+
+First, we start by defining the relevant bands from Sentinel-2 and select them.
+
+``` javascript
+var selected_bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 
+                    'B8', 'B8A', 'B11', 'B12'];
+s2 = s2.select(selected_bands);
+print('selected_bands', selected_bands);
+```
+
+## Define Time Range for Image Collection
+
+We then select the date within which we want to obtain the data. For this case we only need the data for 2024.
+
+``` javascript
+var start_date = "2024-01-01";  // Start date of image collection
+var end_date = "2025-01-01";    // End date of image collection
+```
+
+::: callout-note
+## Note
+
+Including `2025-01-01` ensures that the data for `2024-12-31` is captured as the last element is ignored. That is, the data for `2025-01-01` will not be included.
+:::
+
+## Prepare the canopy height data
+
+The [canopy-height](https://gee-community-catalog.org/projects/meta_trees/) data we are using is from **meta** (Facebook) [@tolan2024]. The major preparation for the data is to mosaic and rename it as follows:
+
+```{.javascript}
+canopy_ht = canopy_ht.mosaic().rename('ch');
+```
+
+## Create the cloud-free composite
+
+At this step, we will filter the Sentinel-2 images by the roi, date, apply cloud-score+ masking, get median image for the year, scale the values to reflectance, select the appropriate bands, add the canopy_ht data, and finally convert all data to float as follows:
+
+```{.javascript}
+var composite = s2
+  .filterBounds(roi)                          // Keep images overlapping the roi
+  .filterDate(start_date, end_date)           // Filter only for the dates needed
+  .linkCollection(cs_plus, 'cs')              // Attach the cloud score band 
+  .map(function(img){
+    return img.updateMask(img.select('cs').gte(0.6));  // Mask out cloudy pixels (cloud score < 0.6)
+  })
+  .median()                                   // Reduce image collection to a single median composite
+  .multiply(0.0001)                           // Scale reflectance values
+  .select(selected_bands)                     // Re-select bands post-scaling, 'cs' was linked
+  .addBands(canopy_ht)
+  .toFloat();                                 // Clip the final composite to the roi
+```
+
+You can then print the composite image properties to Console to verify band structure and completeness.
+
+```{.javascript}
+print('Composite + canopy height', composite);  // Expecting a single image with 11 bands
+
+```
+
+## Contributing images
+
+Sometimes the filtering can affect the number of images that contribute values to the composite. For example, you might find that all images for March to June were too cloudy and all discarded or severely masked. So, we will go ahead and print out the images that contributed to our composite:
+
+```{.javascript}
+print('Images used', 
+  s2
+  .filterBounds(roi)
+  .filterDate(start_date, end_date)
+  .linkCollection(cs_plus, 'cs')
+    .map(function(img){
+      return img.updateMask(img.select('cs').gte(0.6));
+      }));
+  
+//  Compare with cloudy pixel percentage (Old approach...only 21 images or so)
+print('Images used no cs_plus', 
+  s2
+  .filterBounds(roi)
+  .filterDate(start_date, end_date)
+  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10)));
+```
+
+::: callout-tip
+## Tip
+**Masking pixel-wise** is better than filtering using **CLOUDY_PIXEL_PERCENTAGE** as the former only affects cloudy pixels while the latter discards the whole image depending on proportion of cloudy pixels. 
+:::
+
+## Visualize the composite
+
+Next, we can add a true-color layer (RGB: B4, B3, B2) to the map for visual inspection:
+
+```{.javascript}
+Map.centerObject({object: roi, zoom: 13});
+
+Map.addLayer(
+  composite.clip(roi), 
+  {
+    min: 0.019347,              // Obtained from the Layers panel, min value (sometimes based on 98% of values)
+    max: 0.124803,              // Obtained from the Layers panel, these are to enhance visualization
+    bands: ['B4', 'B3', 'B2']   // Bands to use for visualization, RGB (true color composite)
+  }, 
+  'composite',                  // Name of the layers in Layers panel
+  false                         // Do not display layer by default (can be turned on in Layers panel), makes computations faster
+);
+```
+
+## Add `roi` boundary
+
+On top of the image, we can add (paint) the `roi` borders, just to verify that the image is falling within the bounds of our area of interest as follows:
+
+```{.javascript}
+var roi_outline = ee.Image().paint({ // Paints the edges of roi as new raster layer
+  featureCollection: roi,            // The region of interest to be visualized
+  width: 4                           // Outline thickness in pixels
+});
+
+// Center the map view on the ROI and add the red border outline
+
+Map.addLayer(roi_outline, {palette: 'red'}, 'roi');
+```
+
+## Export image composite to drive
+
+We then save the composite for offline use (e.g. in `R`, `Python`, `QGIS`, `Colab` etc). This is simply achieved using the following code:
+
+```{.javascript}
+Export.image.toDrive({                // Function to export an image to Google drive
+  image: composite,                   // The 11 band image to be exported
+  description: 's2_ch_image',         // Task name to appear in the Tasks tab while exporting
+  folder: 'winter2025',               // Folder in your Google Drive to hold the image
+  fileNamePrefix: 'win2025',          // Prefix for output file name
+  region: roi,                        // Export region bounds
+  scale: 10,                          // Spatial resolution (Sentinel-2 native resolution)
+  maxPixels: 1e13,                    // Allow large exports, up to 1e13 pixels per image.
+  crs: "EPSG:3857"                    // Set coordinate reference system (Web Mercator)
+});
+```
+
+## Create training points for machine learning
+
+Interactively create 100 or more points for tea fields as `FeatureCollection` with property label of `1` and 
+non_tea as `0`. Follow these steps:
+
+1. Within the mapping area to the left, hover over `Add a marker` icon and click it
+2. `Geometry Imports` tab will pop, with **geometry** selected, click on `Edit layer properties` ⚙️
+3. Configure geometry import will pop up. Under **Name** enter _tea_points_
+4. Under `Import as`, click drop down icon and select `FeatureCollection`
+5. Under `Properties` click the add property button **+Property**, with under **Property** put $label$ and under **Value** put `1`. Click **OK**
+6. Repeat the same for _non_tea_points_ under **Name** and under **Value** put `0`
+7. On the composite map in display, select tea_points and mark points on the map you 'think' are tea plantations. Do the same for non_tea_points. The points should be as distributed as possible throughout the study area. 
+
+Then merge the two (tea_points and non_tea_points) as follows:
+
+```{.javascript}
+Map.addLayer(tea_points, {color: 'purple'}, 'tea_points');
+Map.addLayer(non_tea_points, {color: 'red'}, 'non_tea_points');
+
+var training_points = tea_points.merge(non_tea_points);
+```
+
+::: {.callout-note}
+## Note
+Since we are lumping all other land cover types as no tea, it is important to ensure each non-tea land cover type is adequately represented. For instance, 20 urban, 20 natural forests, 20 water, 20 barren land, 20 planted forests.
+:::
+
+## Export training points
+
+After merging the training points into one object, we can export them too so that we will use them together with the satellite images and canopy height to train our models locally in `R`. This is achieved as follows:
+
+```{.javascript}
+Export.table.toDrive({
+  collection: training_points, 
+  description: "training_points", 
+  folder: "winter2025", 
+  fileNamePrefix: "training_points", 
+  fileFormat: "GeoJSON"
+  });
+```
+
+## Summary of the script
+
+This script demonstrates the workflow for generating a small cloud-free Sentinel-2 image composite and canopy height data
+for a small administrative region in Kenya, specifically tailored for agricultural analysis.
+It includes:
+
+- Selecting and pre-processing relevant spectral bands
+- Applying a cloud mask using a cloud score (`cs_plus`)
+- Generating a 'clean' median composite
+- Adding canopy height map to the spectral bands
+- Visualizing the composite and `roi`
+- Exporting the composite image for further analysis in GIS or machine learning tools
+- Create training points for machine learning and exporting them to drive
+
+This serves as a foundation pipeline that can be adapted for remote sensing applications
+in agriculture, particularly those involving machine learning and deep learning models.
+
+Adapt and extend this script to fit your specific region of interest, time period, or classification objectives.
+
+## Exercies (Optional)
+
+1. Obtain a composite image with canopy height for another small roi with tea fields.
+2. Obtain Google's DeepMind embeddings instead of Sentinel-2 composite.

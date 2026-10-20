@@ -1,0 +1,11 @@
+---
+title: "ENV-320: Satellite Data in Agricultural Economics"
+subtitle: "R and Google Earth Engine tutorials"
+---
+
+Welcome! Pick a week from the menu on the left.
+
+- **Weeks 1–2:** vector and raster data in R
+- **Weeks 3–10:** Google Earth Engine
+
+**Before the first session:** install R, RStudio and the packages listed in Week 1.

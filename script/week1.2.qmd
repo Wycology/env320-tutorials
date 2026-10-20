@@ -1,0 +1,183 @@
+---
+title: "<span style='color:green'>Week 1:</span> <span style='color:blue'>R basics</span>"
+subtitle: "Lecture date: 11-12-2025"
+---
+
+## Introduction
+
+In this session, we will start from the very basic but essential background in working with satellite images and machine learning. Our goals are to:
+
+1.  **Set up an R project** in R Studio.
+2.  **Organize our project** into folders for data, scripts, and outputs.
+3.  **Write our first R script** and learn how to run code.
+4.  **Get region of interest boundary** data from GADM
+5.  **Save the boundary data as a shapefile (.shp)** so that we can use it in Google Earth Engine later.
+6.  **Upload boundary data to GEE** for further analysis in coming sessions.
+
+This is for those who are completely new to coding in `R`. Do not worry, we will explain everything step by step. Ask questions whenever you do not understand or doubt.
+
+## Creating R project
+
+An **`R project`** is simply a special folder where all your work (scripts, data, output) for $one$ project are kept together. It allows you to use relative path to files, which is quite convenient and makes it easier to collaborate and share your work with others. Here is the steps to create your `R` project (assuming you have installed both `R` and `R Studio`):
+
+1.  Open **R Studio**.
+2.  Go to the top left menu bar **File ==\> New Project**.
+3.  Choose **New Directory** ==\> **New Project**.
+4.  Give your project a name, e.g., `satellite_course`.
+5.  Choose where to save it on your computer.
+6.  Click **Create Project**.
+
+::: callout-important
+## Note
+
+👉 Your `R Studio` will open a fresh workspace linked to your project folder. Everything you save will stay nicely organized here.
+:::
+
+Well done! You have created an `R` project for the course which will make your life easier throughout this course and beyond. You can also create other projects by **Using Existing Directory** or **Version Control** but we will not do that in this session.
+
+## Creating sub-folders
+
+It is a good habit to keep your project organized. In this session, we will create three sub-folders:
+
+-   **data** ==\> For storing input data (shapefile, rasters, csvs, etc).
+-   **scripts** ==\> For keeping all your R code.
+-   **output** ==\> For storing your results (plots, tables, processed data).
+
+Here are the steps for creating these:
+
+1.  In the **Files** pane in `R Studio`, hover over the folder icon with **+** symbol and pop-up *Create a new folder*. Click it.
+2.  In the New Folder pop-up, type the name `data`.
+3.  Repeat steps 1 and 2 to create other sub-folders for `scripts` and `data`.
+
+👉 Your project folder should now have the three sub-folders in it.
+
+::: callout-important
+## Note
+
+The sub-folders could also be created programmatically using `dir.create()`, maybe some of you have used `mkdir` elsewhere, but here we choose simplicity.
+:::
+
+## Creating first `R` script
+
+Even though we can use the `R Console` for all coding needs, it is a good practice to create an `R Script`. This is a file which contains all coding instructions and can be shared with colleagues to reproduce your work or help debug. `R` script files normally have the extension `.R` and can be opened in any `R` session. Here are the steps to create an `R script`.
+
+1.  In `R Studio`, go to **File ==\> New File ==\> R Script**. Ctrl+Shift+N can also achieve this.
+2.  A new blank *Untitled1* file will open with cursor blinking at row 1. This is where you will type your code.
+3.  Hover over Save icon and with pop-up *Save current document (Ctrl+S)*, click it, browse to the scripts folder we created earlier and give it a name, say, **week1.2**.
+
+## Installing the necessary packages
+
+Even though `R` comes with several packages pre-installed, there are additional special packages that we will need to install ourselves. These are tools that other people have made to help make the rest of our work easier and it is therefore important to always acknowledge their efforts by citing their works in our publications.
+
+We will install the following packages: `tidyverse` [@tidyverse], `geodata` [@geodata], `sdm` [@sdm], `mapview` [@mapview], `yardstick` [@yardstick], and `tidyr` [@tidyr].
+
+The next step is to create some code which will be able to obtain data from an external repository [GADM](https://gadm.org/) and bring to our R session.
+
+## Getting region of interest boundaries
+
+We will use the package `geodata` to download boundary data of Kenya then filter for our region of interest. If you do not already have the package, you can install it using the `install.packages("geodata")`. Once this is installed, we can call it using library function.
+
+```{r}
+library(geodata) # Also loads terra.
+```
+
+We then create a variable named $kenya$ to hold the national data for Kenya at level 3 which is lowest possible. We set path to `tempdir()` because we are not interested in the whole country data, we only need data for a small administrative region $Kipchebor$ within tea growing Kericho County of Kenya.
+
+```{r}
+kenya <- gadm(country = "Kenya", 
+              level = 3, 
+              path = tempdir())
+roi <- kenya[kenya$NAME_3 == "Kipchebor", ]
+```
+
+## Visualize the roi
+
+We can plot the region of interest file using the `plot()` function from $terra$ package [@terra] as follows:
+
+```{r}
+plot(roi) # Plots the borders of Kipchebor
+```
+
+However, this is a mere polygon with no understanding whether it covers tea growing region or not, for someone without prior knowledge of the region, like us. So, we will use `mapview()` function to create an interactive map, where we can zoom in to details and have a satellite basemap to see tea fields within the roi. Again, if you do not have $mapview$ package [@mapview], you can have it installed by `install.packages("mapview")`.
+
+```{r}
+library(mapview)
+mapview(roi, 
+        map.types = "Esri.WorldImagery",
+        color = "red",
+        lwd = 3,
+        alpha.regions = 0)
+```
+
+Let us also know the area covered by the roi. For that we will use the `expanse()` function from $terra$ package as follows:
+
+```{r}
+expanse(roi, unit = "ha")
+```
+
+Why did we choose this region? The region was chosen because of the following three major reasons, in the descending order of importance:
+
+1.  **Tea** ==\> It covers tea plantations, which are our crop of interest. The plantations also consist of both large scale tea farms and small scale tea farms as well as other land cover types like built up Kericho town.
+2.  **Size** ==\> It is small enough for faster computation for this course.
+3.  I have **local understanding** of the local landscape and tea.
+
+Let us then export it to our $output$ sub-folder which we already created. To achieve this, we will use `writeVector` function from $terra$ package.
+
+## Saving the roi as .SHP for use in GEE
+
+```{r}
+#| eval: false
+writeVector(roi, "output/roi.shp")
+```
+
+Well done! You now have your region of interest as a shapefile in the project folder.
+
+Save your script and let us move to the `Google Earth Engine` (`GEE`).
+
+## Session summary
+
+In this session, we introduced the fundamentals of working with `R` projects in `R Studio` as a foundation for applied satellite data analysis. We began by creating an `R` project and organizing it into sub-folders for $data$, $scripts$, and $outputs$ to ensure reproducibility and good research practice. Participants then learned how to create and save their first `R` script, and how to install and load the necessary `R` packages we need for interacting with the data.
+
+Using the $geodata$ package, we obtained administrative boundary data from [GADM](https://gadm.org/), selected a specific region of interest (Kipchebor in Kericho, Kenya), and explored it through both static plot and interactive visualization with $mapview$ on a satellite basemap. We also calculated the area of the region and discussed why this location was chosen for training purposes. Finally, we exported the region of interest as a shapefile (.shp) to be used later in `GEE` for further remote sensing analyses.
+
+Up to this end, you should be able to:
+
+-   Set up and structure an `R` project for spatial data analysis.
+
+-   Install and manage necessary `R` packages.
+
+-   Import, filter, and visualize geospatial boundary data.
+
+-   Export shapefile for use in `GEE`.
+
+This workflow provided the building blocks for subsequent sessions, where we will integrate `R` with `GEE` to prepare satellite data for agricultural applications.
+
+## Assignments (Optional)
+
+1.  **Extract a polygon** ==\> Extract a level 3 GADM polygon for a tea growing area in another country, say India, Uganda, Turkey, Rwanda, Sri Lanka etc, and inspect it with `mapview` using a satellite basemap. Upload this to your assets in `GEE`.
+
+2.  **Calculate area** ==\> Compute the area of your extracted region in square kilometres using expanse() function.
+
+3.  **Why ROIs matter** ==\> Why is defining region of interest important in agricultural economics involving machine learning spatial analyses?
+
+-   Ensures analyses are focused on relevant spatial units.
+
+-   Allows comparison across regions or over time.
+
+-   Influences policy recommendations and resource allocation.
+
+-   Helps integrate multiple data sets (satellite, survey, administrative).
+
+4.  **Using ROI in GEE** ==\> How could you use your ROI in `GEE`?
+
+-   As boundary for filtering other rasters and vectors.
+
+-   Monitor vegetation indices (e.g., NDVI) over time.
+
+-   Analyze land use or crop patterns.
+
+-   Evaluate impacts of interventions or policy changes.
+
+-   Aggregate (reducing) satellite data for local-level insights.
+
+## References

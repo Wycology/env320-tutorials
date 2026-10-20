@@ -1,0 +1,246 @@
+---
+title: "<span style='color:green'>Tea mapping II: Training ML models in R (sdm)</span>"
+subtitle: "Lecture date: 18-12-2025"
+---
+
+## Introduction
+
+In this session, we will learn how to build spatial machine learning model using `sdm` package [@sdm]. The main task is to segment tea fields in a given region of interest within Kericho region of Kenya.
+
+## Data sets
+
+We are going to make use of raster data we downloaded from [Google Earth Engine](https://code.earthengine.google.com/815a11e0c6f4e5c357455940f2edc573). You need to have GEE account to be able to see the script in GEE and rerun the task. The raster data is cloud-free median Sentinel-2 image for the year 2024 (filtered for the dates 2024-01-01 to 2025-01-01). The last date ensures that the images for 2024-12-31 are also obtained otherwise they will be ignored.
+
+After exporting the image to drive, we download it to our predefined data folder inside our R project. We then download our training points as GeoJSON as well and save in the working directory. The training data has label as 1 for tea and o for non-tea points. These you could get from very many different sources such as tea farmer organizations or research institute, research organizations etc.
+
+::: callout-note
+# Note
+
+Be careful to write 1 when digitizing tea plantations and 0 for non tea areas. If this is wrongly captured then you might end up with a misclassified image.
+:::
+
+It is important to use the Sentinel-2 image as the basemap and not Google Hybrid Satellite because of time differences on image acquisition dates. Images in Google Satellite Hybrid basemap can be of varying times and might lead to wrong labeling. That is, a point which is still tea field in the Google Satellite Hybrid basemap could already be classified as a building in 2025 etc.
+
+## Loading libraries
+
+We will make use of the following packages to achieve the classification task:
+
+```{r}
+#| message: false
+library(sdm)            # version 1.2.67
+library(ggplot2)        # version 4.0.1
+library(dplyr)          # version 1.1.4
+```
+
+## Loading the data
+
+The following are the data sets which we will use:
+
+-   **predictor_stack**: Raster data set of the Sentinel-2 images and canopy height to predict tea plantations
+
+-   **train_points**: Vector data set of observed tea plantation records and non-tea points
+
+    We also capture the names of the predictor variables in a **predictor_names** object.
+
+```{r}
+predictor_stack <- rast("data/win2025_ml.tif")
+train_points<- vect("data/training_points.geojson")
+train_points <- train_points[, "label"]
+```
+
+We need to project the training points data to the crs of the rasters. Remember, when exporting the table from GEE, the default is *WGS84* while the raster we exported in *EPSG:3857*. So these are different and need to be harmonized. Even though we can project raster to the crs of the vector, it is always a preferred operation to convert the vector to the crs of the raster.
+
+```{r}
+train_proj <- project(train_points, crs(predictor_stack))
+```
+
+## Visualize the data
+
+```{r}
+plot(predictor_stack$B7)
+plot(train_proj[train_proj$label == 1, ],col='yellow',pch=16, add = T)
+plot(train_proj[train_proj$label == 0, ],col='red',pch=16, add = T)
+```
+
+## Creating sdm data object
+
+`sdm` primarily expects the presence and absence/pseudo-absence/background to be provided. They can also have predictor variables associated with them or the predictors be provided separately as a spatRaster object.
+
+In our case, we have `{r} nrow(train_proj[train_proj$label == 1,])` records of occurrences and `{r} nrow(train_proj[train_proj$label == 0,])` records of absence or non-tea points, that is, perfectly balanced.
+
+```{r}
+d <- sdmData(formula = label ~.,
+             train = train_proj,
+             predictors = predictor_stack)
+d
+```
+
+Then we train a single method model using `sdm` function:
+
+```{r}
+m <- sdm(
+  formula = label ~.,
+  data = d,
+  methods = "maxent",
+  replication = "sub",
+  test.p = 30,
+  n = 3
+  )
+```
+
+We can check the results of the model:
+
+```{r}
+m
+```
+
+We can also make predictions:
+
+```{r}
+p <- predict(m, predictor_stack, mean = T)
+plot(p)
+```
+
+We can also show the variable importance:
+
+```{r}
+plot(getVarImp(m))
+```
+
+### Ensemble model by combining several methods (Recommended)
+
+In `sdm`, there are up to `{r} nrow(getmethodNames())` different methods which can be used and ensemble. To do this, we provide the model with names of the methods we want to use. The model will then run all the methods and the user will be able to pick one that best performs or ensemble a couple of best performing methods. Here we go for three methods `rf`, `svm`, and `brt`.
+
+```{r model}
+#| warning: false
+
+model_ens <- sdm(
+  formula = label ~.,
+  data = d,
+  methods = c("rf", "svm", "brt"),
+  replication = "sub",
+  test.p = 30,
+  n = 3
+  )
+```
+
+### Model output
+
+```{r}
+model_ens
+```
+
+## Save the model to disk
+
+It is important to save your model to disk, so that you can use it again another time. You can also share the trained model with a friend/colleague to run in their computer. We can simply achieve that via:
+
+```{r}
+write.sdm(x = model_ens, filename = "models/model_ens.sdm", overwrite = TRUE)
+```
+
+We can then proceed with the predictions.
+
+```{r}
+p <- predict(model_ens, predictor_stack, mean = TRUE)
+```
+
+We can also see the plots of predictions by all methods. Remember the `mean = TRUE` will address each method individually.
+
+```{r}
+plot(p)
+```
+
+## Ensemble the methods
+
+```{r}
+ens <- ensemble(x = m, 
+                newdata = predictor_stack,
+                setting = list(method = "weighted", 
+                               stat = "TSS", opt = 2))
+```
+
+Visualize the ensemble output
+
+```{r}
+plot(ens)
+```
+
+### Binary output
+
+We can use the *pa* function from `sdm` package [@sdm] to calculate the threshold to use that maximizes tss in order to derive a binary map from the probability output:
+
+```{r}
+bin_ens <- pa(x = ens, y = m, id = "ensemble", opt = 2)
+```
+
+Now we can have the binary map based on a threshold that maximizes specificity and sensitivity.
+
+```{r}
+plot(bin_ens, main = "Binary Presence/Absence Map",
+     col = c("grey90", "green4"))
+writeRaster(bin_ens, "outputs/bin_ens.tif", overwrite = TRUE)
+```
+
+## Area under tea
+
+We can then determine how much land is under tea in the region.
+
+```{r}
+tea_area <- terra::expanse(bin_ens, unit = "ha", byValue = TRUE)
+tea_area
+```
+
+```{r}
+tea_area |> 
+  mutate(Class = case_when(value == 1 ~ "Tea",
+                           value == 0 ~ "Non-tea",
+                           TRUE ~ as.character(value))) |> 
+  ggplot(aes(Class, area, fill = Class)) +
+  geom_col() +
+  # Add text labels on top of the bars
+  geom_text(aes(label = round(area)),  # Display area value, rounded to 2 decimals
+            vjust = -0.5,                 # Adjust vertical position (move up)
+            color = "black",               # Set text color
+            size = 5) +                    # Set text size
+  scale_fill_manual(values = c("Non-tea" = "gray70", "Tea" = "darkgreen")) +
+  theme_classic() +
+  # Optional: Adjust y-axis limits to make room for the text
+  ylim(0, max(tea_area$area) * 1.1) # Extends the y-axis limit by 10% to prevent clipping
+```
+
+## Session summary
+
+In this session, we have demonstrated how to create a binary tea map using machine learning procedure and high resolution Sentinel-2 + canopy height image. With this map, for example, you can do the following:
+
+1.  Determine the area under tea.
+2.  Determine how much tea is inside protected areas.
+3.  Compare change in tea areas over time.
+4.  Monitor aspects like tea health, drought, pests, nutrition etc within the tea fields.
+
+## Assignments (Optional)
+
+1.  **Practical exercise** ==\> Build a binary tea map using the $sdm$ package for a region of your choice. Save the raster and calculate the area under tea.
+
+2.  **Practical exercise2** ==\> Overlay your tea map with other land use or protected areas data to summarize tea coverage.
+
+3.  **Conceptual question** ==\> Why is ensemble modeling useful in spatial machine learning for crop mapping?
+
+-   Reduces bias from a single method.
+
+-   Improves prediction accuracy.
+
+-   Provides more robust uncertainty estimates.
+
+-   Helps capture different aspects of the data with complementary models.
+
+4.  **Applied question** ==\> What are the potential sources of error in crop mapping with machine learning?
+
+-   Mislabeling of training points.
+
+-   Spatial or temporal mismatch between predictors and observations.
+
+-   Model overfitting or underfitting.
+
+-   Limitations of input data quality (e.g., cloud cover, sensor artifacts).
+
+## References

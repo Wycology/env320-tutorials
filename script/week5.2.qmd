@@ -1,0 +1,333 @@
+---
+title: "<span style='color:green'>Comparing tea maps: evaluation metrics and a consensus map</span>"
+subtitle: "Lecture date: 27-01-2026"
+---
+
+## Introduction
+
+In this session, we will explore how to **compare different tea fields segmentation models** in Kericho region of Kenya. We will use **binary maps produced by different machine learning workflows** and evaluate them against independently collected point data. Finally, we will create a **consensus map** combining the outputs of all models.
+
+## Loading libraries
+
+```{r}
+#| message: false
+library(terra)          # version 1.2.67
+library(ggplot2)        # version 4.0.1
+library(dplyr)          # version 1.1.4
+library(yardstick)      # version 1.3.2
+library(tidyr)          # version 1.3.1
+library(mapview)        # version 2.11.4
+```
+
+## Datasets
+
+We will work with the following datasets:
+
+\- **roi**: Admininistrative boundary of the study area (spatVector).
+
+\- **eval**: Independent evaluation points (tea vs non-tea) not used in training the models.
+
+\- **bin_enmeval**: Tea map created using MaxEnt (ENMeval).
+
+\- **bin_sdm**: Tea map created using ensemble of rf, svm, and brt in sdm package.
+
+\- **bin_embed**: Tea map created using Google Embeddings.
+
+\- **bin_dl**: Tea map created using deep learning workflow.
+
+## Loading the data
+
+```{r}
+roi         <- vect("data/roi.shp")
+eval        <- vect("data/eval_points.geojson")
+bin_enmeval <- rast("outputs/bin_enmeval.tif")
+bin_sdm     <- rast("outputs/bin_ens.tif")
+bin_embed   <- rast("outputs/embed_ens.tif")
+bin_dl      <- rast("outputs/dl_prediction.tif")
+bin_tessera <- rast("outputs/bin_tessera.tif")
+```
+
+::: callout-important
+## Remember
+
+Always inspect your layers after loading using `plot()` or `summary()` to ensure they loaded correctly.
+:::
+
+## Prepare the data
+
+We will ensure that both vector datasets are in the same crs as the rasters. For that, we will use `project()` and `crs` functions from the $terra$ [@terra].
+
+```{r}
+roi   <- project(roi, crs(bin_enmeval))
+eval  <- project(eval, crs(bin_enmeval))
+```
+
+In the next step we will crop and mask all the rasters to the extent of the roi. Remember, for the deep learning workflow, our image covered slightly more area. We will use `crop` function from the $terra$ package.
+
+```{r}
+bin_enmeval <- crop(bin_enmeval, roi, mask = TRUE)
+bin_sdm     <- crop(bin_sdm, roi, mask = TRUE)
+bin_embed   <- crop(bin_embed, roi, mask = TRUE)
+bin_dl      <- crop(bin_dl, roi, mask = TRUE)
+bin_tessera <- crop(bin_tessera, roi, mask = TRUE)
+bin_tessera <- resample(bin_tessera, bin_dl, method = "near")
+```
+
+We can then rename all the individual rasters then merge them into a single object, we use `names` function from $terra$. We then use `c` function from base `R` to combine them:
+
+```{r}
+names(bin_enmeval)  <- "bin_enmeval"
+names(bin_sdm)      <- "bin_sdm"
+names(bin_embed)    <- "bin_embed"
+names(bin_dl)       <- "bin_dl"
+names(bin_tessera)  <- "bin_tes"
+
+bins_all <- c(bin_enmeval, bin_sdm, bin_embed, bin_dl, bin_tessera)
+```
+
+## Extract predictions at evaluation points
+
+Our evaluation data has the observed/known values at every point. That is, someone practically went to the exact locations in 2024 and made observations to confirm whether there was tea or no-tea (although we did them ourselves in GEE due to lack of funding to travel to Kericho :)). Relative to that "ground truth", we want to check how well our model agrees with the observations. First, we extract from the rasters, what they predicted at the respective locations. We use `extract` function from the $terra$ and then convert to data.frame and drop "id" column as follows:
+
+```{r}
+df <- as.data.frame(terra::extract(bins_all, eval, bind = TRUE))[, -1]
+head(df)
+tail(df)
+```
+
+## Evaluation metrics calculations
+
+Now, to simplify evaluation metrics computation, we will define a function. The function will use a number of metrics from the $yardstick$ package [@yardstick] and others from $dplyr$ [@dplyr]:
+
+```{r}
+df <- df %>%
+  mutate(across(c(label, bin_enmeval, bin_sdm, bin_embed, bin_dl, bin_tes), as.factor))
+compute_metrics <- function(data, model_col) {
+  data |> 
+    mutate(pred = .data[[model_col]]) |> 
+    metric_set(accuracy, kap, precision, recall, f_meas)(truth = label, estimate = pred) |> 
+    mutate(model = model_col)
+}
+
+results <- bind_rows(
+  compute_metrics(df, "bin_enmeval"),
+  compute_metrics(df, "bin_sdm"),
+  compute_metrics(df, "bin_embed"),
+  compute_metrics(df, "bin_dl"),
+  compute_metrics(df, "bin_tes")
+)
+
+results |> head()
+```
+
+The following is the descriptions of the evaluation metrics obtained returned:
+
+-   **accuracy**: Proportion of all predictions that were correct (TP + TN) / All predictions.
+-   **precision**: Among points predicted as tea, how many were actually tea? (TP / (TP + FP)). (to avoid false alarm, predicting tea where there is none).
+-   **recall**: Among all actual tea points, how many did the model correctly identify? (TP / (TP + FN)). (useful when missing tea fields is more problematic than false alarm).
+-   **sensitivity**: Same as recall.
+-   **specificity**: Same as precision. (how good is the model at ruling out non-tea).
+-   **F1 Score**: Hermonic mean of precision and recall. 2 × (Precision × Recall) ÷ (Precision + Recall). Balances "how many tea fields we find" (recall) with "how reliable our tea predictions are" (precision).
+-   **Kappa**: Agreement between model predictions and true labels, adjusted for chance agreement. (How much better is the model than random guessing after accounting for chance). Preferred in case of imbalanced data.
+
+::: callout-note
+## Don't forget
+
+1.  If you want overall correctness, use **accuracy**.
+2.  If you care about avoiding false tea predictions, use **precision**
+3.  If you care about not missing tea fields, use **recall**
+4.  If you want a balanced view, use **F1**
+5.  If you want a robust agreement measure, use **Kappa**.
+:::
+
+## Visualize the output by Metric
+
+We can use $ggplot2$ package [@ggplot2] to plot the evaluation metrics to appreciate how they varied among the modeling methods we used.
+
+```{r}
+
+# Clean up metric names for plotting
+plot_data <- results %>%
+  filter(.metric %in% c("accuracy", "precision", "recall", "f_meas", "kap")) %>%
+  mutate(.metric = factor(.metric, 
+                          levels = c("accuracy", "precision", "recall", "f_meas",  "kap"),
+                          labels = c("Accuracy", "Precision", "Recall", "F1", "Kappa")),
+         model = factor(model, 
+                        levels = c("bin_enmeval", "bin_sdm", "bin_embed", "bin_dl", "bin_tes"),
+                        labels = c("ENMeval (MaxEnt)", "SDM Ensemble", "Google Embeddings", "Deep Learning", "GeoTessera")))
+
+# Grouped bar chart
+ggplot(plot_data, aes(x = .metric, y = .estimate, fill = model)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = round(.estimate, 2)), 
+            position = position_dodge(width = 0.8), 
+            vjust = 0.5, hjust = -0.5, size = 3) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(x = "Metric", y = "Score", fill = "Model",
+       title = "Comparison of Tea Segmentation Models",
+       subtitle = "Performance metrics against independent evaluation data") +
+  ylim(0, 1.1) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))+
+  coord_flip()
+
+```
+
+We can also have the modeling methods on the x axis and observe the evolving patterns in the metrics.
+
+```{r}
+ggplot(plot_data, aes(x = model, y = .estimate, fill = .metric)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = round(.estimate, 2), group = .metric), 
+            position = position_dodge(width = 0.8), 
+            vjust = 0.5, hjust = -0.5, size = 3) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(x = "Model", y = "Score", fill = "Metric",
+       title = "Which Tea Segmentation Model Performs Best?",
+       subtitle = "Compare Accuracy, Precision, Recall, F1, etc.") +
+  ylim(0, 1.05) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1)) +
+  coord_flip()
+
+```
+
+```{r}
+
+# Clean up metric names for plotting
+plot_data <- results %>%
+  filter(.metric %in% c("accuracy", "precision", "recall", "f_meas", "kap")) %>%
+  filter(model %in% c("bin_sdm", "bin_embed", "bin_tes")) |> 
+  mutate(.metric = factor(.metric, 
+                          levels = c("accuracy", "precision", "recall", "f_meas",  "kap"),
+                          labels = c("Accuracy", "Precision", "Recall", "F1", "Kappa")),
+         model = factor(model, 
+                        levels = c("bin_sdm",  "bin_embed", "bin_tes"),
+                        labels = c("Sentinel-2 + CH", "Google Embeddings", "GeoTessera")))
+
+# Grouped bar chart
+ggplot(plot_data, aes(x = .metric, y = .estimate, fill = model)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = round(.estimate, 2)), 
+            position = position_dodge(width = 0.8), 
+            vjust = 0.5, hjust = -0.5, size = 4) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(x = "Metric", y = "Score", fill = "Model",
+       title = "Comparison of Datasets for Segmentation of Tea Plantations",
+       subtitle = "Performance metrics against independent evaluation data") +
+  ylim(0, 1.1) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, face = "bold", size = 14),
+        axis.text.y = element_text(colour = "black", size = 16))+
+  coord_flip()
+
+```
+
+## Visualize the maps
+
+In our case, basically all models performed quite similarly on the data. Here is how we can visualize all the four plots together; we do some tydying using $tidyr$ [@tidyr].
+
+```{r}
+# Convert raster stack to a long data frame for ggplot
+bins_df <- as.data.frame(bins_all, xy = TRUE) %>%
+  pivot_longer(cols = starts_with("bin_"), 
+               names_to = "model", values_to = "value")
+
+# Clean model labels for readability
+bins_df$model <- factor(bins_df$model,
+                        levels = c("bin_enmeval", "bin_sdm", "bin_embed", "bin_dl", "bin_tes"),
+                        labels = c("ENMeval (MaxEnt)", "SDM Ensemble", 
+                                   "Google Embeddings", "Deep Learning", "GeoTessera"))
+
+# Plot
+ggplot(bins_df %>% filter(!is.na(value))) +
+  geom_raster(aes(x = x, y = y, fill = factor(value))) +
+  scale_fill_manual(values = c("0" = "transparent", "1" = "forestgreen"),
+                    labels = c("Non-tea", "Tea")) +
+  facet_wrap(~model, ncol = 2) +
+  coord_equal() +
+  theme_minimal(base_size = 14) +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        legend.position = "bottom") +
+  labs(title = "Binary Tea Field Maps ",
+       fill = "Class")
+
+```
+
+We can also visualize the model outputs interactively using the `mapview` [@mapview] package.
+
+```{r}
+mapview(bin_enmeval,
+        col.regions = c("transparent", "darkgreen"),
+        na.color = "transparent",
+        map.types = "Esri.WorldImagery") +
+  mapview(roi, 
+        map.types = "Esri.WorldImagery",
+        color = "red",
+        lwd = 3,
+        alpha.regions = 0)
+```
+
+## Consensus map
+
+Finally, we can have our binary tea map based on consensus of the four models outputs. Basically, the map should contain 1 if at least 3 model outputs predict is as 1 otherwise a 0.
+
+```{r}
+consensus <- app(bins_all, fun = function(x) {
+  ifelse(sum(x, na.rm = TRUE) >= 3, 1, 0)
+})
+
+# Attach labels to the values
+levels(consensus) <- data.frame(value = c(0, 1),
+                                class = c("Non-tea", "Tea"))
+
+# Plot categorical raster with transparent background for 0
+plot(consensus,
+     col = c("transparent", "darkgreen"),
+     type = "classes",
+     main = "Tea Map for Kipchebor, 2024",
+     plg = list(legend = c("Non-tea", "Tea")))
+
+# Overlay ROI
+plot(roi, border = "blue", lwd = 2, add = TRUE)
+```
+
+## Session summary
+
+In this session, we have demonstrated how to evaluate different model ouputs, visualize the metrics and create a consensus binary tea map.
+
+## Assignments (Optional)
+
+1. **Practical exercise** ==> Using the four binary tea maps (bin_enmeval, bin_sdm, bin_embed, bin_dl), calculate evaluation metrics (accuracy, precision, recall, F1, Kappa) using a new set of independent evaluation points.
+
+2. **Practical exercise** ==> Create a consensus map where a pixel is labeled as tea only if all of the models predict it as tea. Visualize the consensus map.
+
+3. **Conceptual question** ==> Why is a consensus map useful compared to relying on a single model?
+
+* Reduces model-specific errors and biases.
+
+* Improves reliability where models agree.
+
+* Smooths out over-predictions or under-predictions from individual models.
+
+* Provides more robust estimates for area under tea.
+
+4. **Applied question** ==> Which evaluation metric would you prioritize if your goal is to avoid missing tea plantations, and why?
+
+* Recall (sensitivity) — ensures the model captures as many true tea fields as possible, minimizing false negatives.
+
+5. **Applied question** ==> Which evaluation metric would you prioritize if your goal is to avoid falsely labeling non-tea areas as tea?
+
+* Precision — ensures the predicted tea areas are truly tea, minimizing false positives.
+
+6. **Analytical question** ==> How might differences in spatial resolution, input data type (Sentinel-2 vs Google Embeddings vs DL features), or model choice affect evaluation metrics?
+
+* Finer resolution can improve detection of small tea fields (higher recall).
+
+* Richer feature representations (Google Embeddings, DL) can improve precision.
+
+* Model choice affects overfitting vs generalization; some may perform better in heterogeneous landscapes.
+
+## References

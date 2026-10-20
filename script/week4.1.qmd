@@ -1,0 +1,260 @@
+---
+title: "<span style='color:green'>Tea mapping V: Using Tessera foundation-model embeddings</span>"
+subtitle: "Lecture date: 15-01-2026"
+---
+
+## Introduction
+
+In this session, we will learn how to build spatial machine learning model using `sdm` package [@sdm]. The main task is to segment tea fields in a given region of interest within Kericho region of Kenya using [Tessera geospatial foundation model](https://github.com/Wycology/geotessera) Embeddings.
+
+## Google Colab
+
+This is the code which you can run in `Google Colaboratory (Colab)` to access the 128 dimension image from `GeoTessera`.
+
+``` python
+!pip install geotessera
+from geotessera import GeoTessera
+
+# Open terminal, it is in the bottom left of your screen near Variables {} and run the code below inside the terminal
+
+geotessera download --bbox "35.23098,-0.4050101,35.30507,-0.341693" --year 2024 --output .
+# You can change the coordinates to your region of interest.
+# Raise issue in GeoTessera GitHub if your roi has no image
+```
+
+## Data sets
+
+We are going to make use of the `Tessera Embeddings` data we downloaded via Terminal in `Google Colab`, see example in the [GitHub](https://github.com/ucam-eo/geotessera) page of the `GeoTessera` library. The raster data has **128** dimensions and we extracted for the year **2024**. We previously created an issue requesting for other years and now you can access other years too, that is, from 2017 to 2024 for this `roi`. The data is annual.
+
+After downloading the image to local drive, we save it to our predefined data folder inside our `R` project. We will use our previously created training data (tea and non-tea points) from our previous modeling session involving Sentinel-2 images. The training data has $label$ as `1` for tea and `0` for non-tea points. You could get these from very many different sources such as tea farmer organizations or publications, research organizations etc.
+
+## Loading libraries
+
+We will make use of the following packages to achieve the classification task:
+
+```{r}
+#| message: false
+library(sdm)            # version 1.2.67
+library(ggplot2)        # version 4.0.1
+library(dplyr)          # version 1.1.4
+```
+
+## Loading the data
+
+The following are the data sets which we will use:
+
+-   **predictor_stack**: Raster data set of the `Tessera Embeddings` images to predict tea plantations
+
+-   **train_points**: Vector data set of 'observed' tea and non-tea points
+
+```{r}
+embed_stack <- rast("data/tessera_merged.tif")
+train_points<- vect("data/training_points.geojson")
+train_points <- train_points[, "label"] # Selecting only the label column.
+```
+
+We need to project the embed_stack data to the **crs** of the other rasters we have been working with, that is `"EPSG:3857"`. Then we also project the train_points to that crs.
+
+::: callout-tip
+## Tip
+
+The 128 GeoTessera dimensions are downloaded based on the **crs** of the local UTM zone, so we need to re-project it to match with the rest.
+:::
+
+```{r}
+embed_stack <- project(embed_stack, "EPSG:3857")
+train_proj <- project(train_points, crs(embed_stack))
+```
+
+## Visualize the data
+
+We can plot the raster and both tea and non-tea training points colored differently for visual appeal.
+
+```{r}
+plot(embed_stack$Tessera_Band_12)
+plot(train_proj[train_proj$label == 1, ],col='blue',pch=16, add = T)
+plot(train_proj[train_proj$label == 0, ],col='red',pch=16, add = T)
+```
+
+## Creating sdm data object
+
+`sdm` primarily expects the presence and absence/pseudo-absence/background to be provided. They can also have predictor variables associated with them or the predictors be provided separately as a `spatRaster` object.
+
+In our case, we have `{r} nrow(train_proj[train_proj$label == 1,])` records of occurrences (tea points) and `{r} nrow(train_proj[train_proj$label == 0,])` records of absence or non-tea points, that is, perfectly balanced.
+
+We then create the `sdm` data object using these.
+
+```{r}
+d <- sdmData(formula = label ~.,
+             train = train_proj,
+             predictors = embed_stack)
+d
+```
+
+Then we train a single method model using `sdm` function:
+
+::: callout-tip
+## Tip
+
+This model can take a lot of time to run compared to Sentinel-2 + canopy height one because we now have 128 'variables'. It is important to engage parallel processing in this case.
+:::
+
+```{r}
+m <- sdm(
+  formula = label ~.,
+  data = d,
+  methods = "maxent",
+  replication = "sub",
+  test.p = 30,
+  n = 3,
+  parallelSetting = list(ncore = 10,
+                         method = 'parallel')
+  )
+```
+
+We can check the results of the model by running the model object:
+
+```{r}
+m
+```
+
+We can also make predictions:
+
+```{r}
+p <- predict(m, embed_stack, mean = TRUE, 
+             parallelSetting = list(ncore = 10,
+                                    method = "parallel"))
+plot(p)
+```
+
+We can also show the variable importance:
+
+```{r}
+plot(getVarImp(m))
+```
+
+### Ensemble model by combining several methods (Recommended)
+
+We built the previous simple model by considering only one method, `MaxEnt`. However, in `sdm`, there are up to `{r} nrow(getmethodNames())` different methods which can be used and ensemble. To do this, we provide the model with names of the methods we want to use. The model will then run all the methods and the user will be able to pick one that best performs or ensemble a couple of best performing methods. Here we go for three methods `rf`, `svm`, and `brt`.
+
+```{r model}
+#| warning: false
+
+model_ens <- sdm(
+  formula = label ~.,
+  data = d,
+  methods = c("rf", "svm", "brt"),
+  replication = "sub",
+  test.p = 30,
+  n = 3,
+  parallelSetting = list(ncore = 10,
+                         method = 'parallel')
+  )
+```
+
+### Model output
+
+```{r}
+model_ens
+```
+
+We can then proceed with the predictions.
+
+```{r}
+p <- predict(model_ens, embed_stack, mean = TRUE,
+             parallelSetting = list(ncore = 10, 
+                                    method = "parallel"))
+```
+
+We can also see the plots of all methods. Remember the `mean = TRUE` will address each method individually.
+
+```{r}
+plot(p)
+```
+
+## Ensemble the methods
+
+```{r}
+ens <- ensemble(x = model_ens, 
+                newdata = embed_stack,
+                setting = list(method = "weighted", stat = "TSS", opt = 2))
+```
+
+Visualize the ensemble output
+
+```{r}
+plot(ens)
+```
+
+### Binary output
+
+We can use the *pa* function from `sdm` package [@sdm] to calculate the threshold to use that maximizes **TSS** in order to derive a binary map from the probability output:
+
+```{r}
+bin_ens <- pa(x = ens, y = m, id = "ensemble", opt = 2)
+```
+
+Now we can have the binary map based on a threshold that maximizes specificity and sensitivity.
+
+```{r}
+plot(bin_ens, main = "Binary Presence/Absence Map",
+     col = c("grey90", "green4"))
+writeRaster(bin_ens, "outputs/tessera_ens.tif", overwrite = TRUE)
+```
+
+## Area under tea
+
+We can then determine how much land is under tea in the region.
+
+```{r}
+tea_area <- terra::expanse(bin_ens, unit = "ha", byValue = TRUE)
+tea_area
+```
+
+```{r}
+tea_area |> 
+  mutate(Class = case_when(value == 1 ~ "Tea",
+                           value == 0 ~ "Non-tea",
+                           TRUE ~ as.character(value))) |> 
+  ggplot(aes(Class, area, fill = Class)) +
+  geom_col() +
+  # Add text labels on top of the bars
+  geom_text(aes(label = round(area)),  # Display area value, rounded to 2 decimals
+            vjust = -0.5,                 # Adjust vertical position (move up)
+            color = "black",               # Set text color
+            size = 5) +                    # Set text size
+  scale_fill_manual(values = c("Non-tea" = "gray70", "Tea" = "darkgreen")) +
+  theme_classic() +
+  # Optional: Adjust y-axis limits to make room for the text
+  ylim(0, max(tea_area$area) * 1.1) # Extends the y-axis limit by 10% to prevent clipping
+```
+
+## Session summary
+
+In this session, we have demonstrated how to create a binary tea map using machine learning procedure and recently developed `Tessera Embeddings` data set. We will check how the prediction compares with the other methods.
+
+## Assignments (Optional)
+
+1.  **Practical exercise** ==\> Build a spatial ML model using `Tessera Embeddings` data to create a binary tea map and calculate the area under tea for your area of interest. Note that `Tessera Embeddings` are not available globally yet, you can create an issue on their GitHub page and they will avail.
+
+2.  **Practical exercise (optional)** ==\> Compare the prediction results from `Teserra Embeddings` data with previous Sentinel-2 models for the same region as well as `Google Embeddings`.
+
+3.  **Conceptual question** ==\> Why might `Tessera Embeddings` improve predictions compared to traditional spectral bands?
+
+-   Encodes high-dimensional, pre-learned features capturing complex land cover patterns.
+
+-   May generalize better in heterogeneous or mixed-use landscapes.
+
+-   Helps model subtle differences between tea and non-tea areas not captured by raw bands.
+
+4.  **Applied question** ==\> What are key considerations when using a new data source (like `Tessera Embeddings`) for spatial ML modeling?
+
+-   Ensure training points are accurately labeled (only possible from optic bands).
+
+-   Harmonize projection/CRS between raster and vector data.
+
+-   Evaluate model performance and variable importance.
+
+-   Check consistency and applicability across regions or time periods.
+
+## References

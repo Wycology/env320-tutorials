@@ -1,0 +1,330 @@
+---
+title: "<span style='color:green'>Tea mapping IV: Using Google satellite embeddings</span>"
+subtitle: "Lecture date: 13-01-2026"
+---
+
+## Introduction
+
+In this session, we will learn how to build spatial machine learning model using `sdm` package [@sdm]. The main task is to segment tea fields in a given region of interest within Kericho region of Kenya using `Google Embeddings` data set.
+
+## Google Earth Engine
+
+You can run the code in the snippet below in the `GEE` code editor to obtain the `Google embeddings` for use in this script
+
+``` javascript
+var embed = ee.ImageCollection("GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL")
+var roi = ee.FeatureCollection("projects/ee-wyclifeaoluoch/assets/roi_win_2025") // Repplace with your assest path
+
+/*
+SATELLITE DATA FOR AGRICULTURAL ECONOMISTS
+THEORY AND PRACTICE
+
+Mapping tea plantations in Kericho region of Kenya: Deep Learning Approach
+David Wuepper, Hadi, Wyclife Agumba Oluoch
+Affiliations:
+  - Land Economics Group (https://www.ilr1.uni-bonn.de/en/research/research-groups/land-economics), University of Bonn, Bonn, Germany
+
+This script, demonstrates how to create, visualize, and export to drive Google Embeddings for use in machine and deep learning models.
+*/
+
+// --------------------------------------------
+// 1. Define Time Range for Image Collection
+// --------------------------------------------
+
+var start_date = "2024-01-01";  // Start date of image collection
+var end_date = "2025-01-01";    // End date of image collection
+
+// --------------------------------------------
+// 2. Obtain the embedding for the roi and time span
+// --------------------------------------------
+
+var embed = embed
+  .filterBounds(roi)                          // Keep images overlapping the region of interest
+  .filterDate(start_date, end_date)           // Filter only for the dates needed
+  .mosaic();                                   // Reduce image collection to a single median image
+
+// Print image properties to console to verify band structure and completeness
+
+print('Embeddings', embed);  // Expecting a single image with 64 bands
+
+// --------------------------------------------
+// 5. Visualization of the Embedding
+// --------------------------------------------
+// Add any dimension to the map for visual inspection
+Map.centerObject({object: roi, zoom: 13});
+
+Map.addLayer(
+  embed.clip(roi), 
+  {
+    min: -0.031,                   // Obtained from the Layers panel, min value (sometimes based on 98% of values)
+    max: 0.177,                    // Obtained from the Layers panel, these are to enhance visualization
+    bands: ['A01', 'A02', 'A03']  // Bands to use for visualization, RGB (true color composite)
+  }, 
+  'composite',                    // Name of the layers in Layers panel
+  false                           // Do not display layer by default (can be turned on in Layers panel), makes computations faster
+);
+
+// --------------------------------------------
+// 6. Display ROI Outline
+// --------------------------------------------
+// Paint the ROI geometry outline in red
+
+var roi_outline = ee.Image().paint({ // Paints the edges of roi as new raster layer
+  featureCollection: roi,            // The region of interest to be visualized
+  width: 4                           // Outline thickness in pixels
+});
+
+// Center the map view on the ROI and add the red border outline
+
+Map.addLayer(roi_outline, {palette: 'blue'}, 'roi');
+
+// --------------------------------------------
+// 7. Export Image Composite to Google Drive
+// --------------------------------------------
+// Save the processed image composite for offline use (e.g., in R or GIS software)
+
+Export.image.toDrive({                // Function to export an image to Google drive
+  image: embed.clip(roi),             // The image to be exported
+  description: 'embed_image',         // Task name to appear in the Tasks tab while exporting
+  folder: 'winter2025',               // Folder in your Google Drive to hold the image
+  fileNamePrefix: 'embed2024',        // Prefix for output file name
+  region: roi,                        // Export region bounds
+  scale: 10,                          // Spatial resolution (Sentinel-2 native resolution)
+  maxPixels: 1e13,                    // Allow large exports
+  crs: "EPSG:3857"                    // Set coordinate reference system (Web Mercator)
+});
+
+
+// --------------------------------------------
+// 10. Script Summary
+// --------------------------------------------
+/*
+This script demonstrates the workflow for generating a small Google Embeddings image composite 
+for a small administrative region in Kenya, specifically tailored for agricultural analysis thereafter.
+It includes:
+
+- Loading, selecting, and mosaicking the embeddings
+- Visualizing the composite and roi
+- Exporting the composite image for further analysis in GIS or machine learning tools
+
+Adapt and extend this script to fit your specific region, time period, or classification objectives.
+*/
+
+/////////////////E N D //////////////////
+```
+
+## Datasets
+
+We are going to make use of `Google Embeddings` data set we downloaded from [Google Earth Engine](https://code.earthengine.google.com/672ca11f8a48c9f5146fd6c27d71806d). You need to have `GEE` account to be able to see the script in GEE and rerun the task. The raster data is 64 dimension `Google Embeddings` image for the year 2024.
+
+After exporting the image to drive, we download it to our predefined data folder inside our `R` project. We will use our previously created training data from our previous modeling session involving Sentinel-2 images. The training data has $label$ attribute as `1` for tea and `0` for non-tea points. Such data you could get from very many different sources such as tea farmer organizations or research institute, research organizations, past publications etc.
+
+## Loading libraries
+
+We will make use of the following packages to achieve the classification/segmentation task:
+
+```{r}
+#| message: false
+library(sdm)            # version 1.2.67
+library(ggplot2)        # version 4.0.1
+library(dplyr)          # version 1.1.4
+```
+
+## Loading the data
+
+The following are the data sets which we will use:
+
+- **predictor_stack**: Raster data set of the `Google Embeddings` images to predict tea plantations
+
+- **train_points**: Vector data set of observed tea and non-tea points
+
+```{r}
+embed_stack <- rast("data/embed2024.tif")
+train_points<- vect("data/training_points.geojson")
+train_points <- train_points[, "label"]
+```
+
+We need to project the training points data to the **crs** of the rasters. Remember, when exporting the table from `GEE`, the default is *WGS84* while the raster we exported in *EPSG:3857*. So these are different and need to be harmonized. Even though we can project raster to the **crs** of the vector, it is always a preferred operation to convert the vector to the **crs** of the raster.
+
+```{r}
+train_proj <- project(train_points, crs(embed_stack))
+```
+
+## Visualize the data
+
+```{r}
+plot(embed_stack$A00)
+plot(train_proj[train_proj$label == 1, ],col='blue',pch=16, add = T)
+plot(train_proj[train_proj$label == 0, ],col='red',pch=16, add = T)
+```
+
+## Creating sdm data object
+
+`sdm` primarily expects the presence and absence/pseudo-absence/background to be provided. They can also have predictor variables associated with them or the predictors be provided separately as a spatRaster object.
+
+In our case, we have `{r} nrow(train_proj[train_proj$label == 1,])` records of occurrences (tea points) and `{r} nrow(train_proj[train_proj$label == 0,])` records of absence (non-tea points), that is, perfectly balanced.
+
+```{r}
+d <- sdmData(formula = label ~.,
+             train = train_proj,
+             predictors = embed_stack)
+d
+```
+
+Next, we train a single method model using `sdm` function:
+
+```{r}
+m <- sdm(
+  formula = label ~.,
+  data = d,
+  methods = "maxent",
+  replication = "sub",
+  test.p = 30,
+  n = 3,
+  parallelSetting = list(ncore = 10,
+                         method = 'parallel')
+  )
+```
+
+We can check the results of the model:
+
+```{r}
+m
+```
+
+We can also make predictions. Adjust *ncore* depending on available cores in your machine.
+
+```{r}
+p <- predict(m, embed_stack, mean = TRUE, parallelSetting = list(ncore = 10, method = "parallel"))
+plot(p)
+```
+
+We can also show the variable importance:
+
+```{r}
+plot(getVarImp(m))
+```
+
+### Ensemble model by combining several methods (Recommended)
+
+We built the previous simple model by considering only one method, `MaxEnt`. However, in `sdm`, there are up to `{r} nrow(getmethodNames())` different methods which can be used and ensemble. To do this, we provide the model with names of the methods we want to use. The model will then run all the methods and the user will be able to pick one that best performs or ensemble a couple of best performing methods. Here we go for three methods `rf`, `svm`, and `brt`.
+
+```{r model}
+#| warning: false
+
+model_ens <- sdm(
+  formula = label ~.,
+  data = d,
+  methods = c("rf", "svm", "brt"),
+  replication = "sub",
+  test.p = 30,
+  n = 3,
+  parallelSetting = list(ncore = 10,
+                         method = 'parallel')
+  )
+```
+
+### Model output
+
+```{r}
+model_ens
+```
+
+We can then proceed with the predictions.
+
+```{r}
+p <- predict(model_ens, embed_stack, mean = TRUE, parallelSetting = list(ncore = 10, method = "parallel"))
+```
+
+We can also see the plots of all methods. Remember the `mean = TRUE` will address each method individually.
+
+```{r}
+plot(p)
+```
+
+## Ensemble the methods
+
+```{r}
+ens <- ensemble(x = m, 
+                newdata = embed_stack,
+                setting = list(method = "weighted", stat = "TSS", opt = 2))
+```
+
+Visualize the ensemble output
+
+```{r}
+plot(ens)
+```
+
+### Binary output
+
+We can use the *pa* function from `sdm` package [@sdm] to calculate the threshold to use that maximizes tss in order to derive a binary map from the probability output:
+
+```{r}
+bin_ens <- pa(x = ens, y = m, id = "ensemble", opt = 2)
+```
+
+Now we can have the binary map based on a threshold that maximizes specificity and sensitivity.
+
+```{r}
+plot(bin_ens, main = "Binary Presence/Absence Map",
+     col = c("grey90", "green4"))
+writeRaster(bin_ens, "outputs/embed_ens.tif", overwrite = TRUE)
+```
+
+## Area under tea
+
+We can then determine how much land is under tea in the region.
+
+```{r}
+tea_area <- terra::expanse(bin_ens, unit = "ha", byValue = TRUE)
+tea_area
+```
+
+```{r}
+tea_area |> 
+  mutate(Class = case_when(value == 1 ~ "Tea",
+                           value == 0 ~ "Non-tea",
+                           TRUE ~ as.character(value))) |> 
+  ggplot(aes(Class, area, fill = Class)) +
+  geom_col() +
+  # Add text labels on top of the bars
+  geom_text(aes(label = round(area)),  # Display area value, rounded to 2 decimals
+            vjust = -0.5,                 # Adjust vertical position (move up)
+            color = "black",               # Set text color
+            size = 5) +                    # Set text size
+  scale_fill_manual(values = c("Non-tea" = "gray70", "Tea" = "darkgreen")) +
+  theme_classic() +
+  # Optional: Adjust y-axis limits to make room for the text
+  ylim(0, max(tea_area$area) * 1.1) # Extends the y-axis limit by 10% to prevent clipping
+```
+
+## Session summary
+
+In this session, we have demonstrated how to create a binary tea map using machine learning procedure and recently developed Google Embeddings dataset. We will check how the prediction compares with the other methods.
+
+## Assignments (Optional)
+
+1.  **Practical exercise** ==\> Build a spatial ML model using Google Embeddings data to create a binary tea map and calculate the area under tea for your area of interest.
+
+2.  **Practical exercise (optional)** ==\> Compare the prediction results from Google Embeddings data with previous Sentinel-2 models for the same region.
+
+3.  **Conceptual question** ==\> Why might Google Embeddings improve predictions compared to traditional spectral bands?
+
+- Encodes high-dimensional, pre-learned features capturing complex land cover patterns.
+
+- May generalize better in heterogeneous or mixed-use landscapes.
+
+- Helps model subtle differences between tea and non-tea areas not captured by raw bands.
+
+4.  **Applied question** ==\> What are key considerations when using a new data source (like Google Embeddings) for spatial ML modeling?
+
+- Ensure training points are accurately labeled (only possible from optic bands).
+
+- Harmonize projection/CRS between raster and vector data.
+
+- Evaluate model performance and variable importance.
+
+- Check consistency and applicability across regions or time periods.
+
+## References
